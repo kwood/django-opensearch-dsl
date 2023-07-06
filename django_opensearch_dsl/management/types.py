@@ -9,6 +9,12 @@ Nothing = type(Ellipsis)
 Values = Union[None, int, float, datetime.datetime, str, List["Values"]]
 
 
+def bool_parser(value: str) -> Union[Nothing, bool]:
+    """Try to parse the given value as a boolean."""
+    if value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    return ...
+
 def datetime_parser(value: str) -> Union[Nothing, datetime.datetime]:
     """Try to parse the given value as a ISO 8601's datetime."""
     try:
@@ -58,7 +64,7 @@ def parse(value: str) -> Values:
     If no parser was able to parse the value, it is returned as a string.
     """
     parsers = getattr(
-        settings, "OPENSEARCH_DSL_VALUE_PARSERS", [none_parser, int_parser, float_parser, datetime_parser, list_parser]
+        settings, "OPENSEARCH_DSL_VALUE_PARSERS", [none_parser, bool_parser, int_parser, float_parser, datetime_parser, list_parser]
     )
     for parser in parsers:
         v = parser(value)
