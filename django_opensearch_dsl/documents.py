@@ -289,10 +289,10 @@ class Document(DSLDocument, metaclass=IndexMeta):
             body["detect_noop"] = True
         return body
 
-    def _get_actions(self, object_list, action, limit_fields):
+    def _get_actions(self, object_list, action, limit_fields, **kwargs):
         for object_instance in object_list:
             if action == "delete" or self.should_index_object(object_instance):
-                yield self._prepare_action(object_instance, action, limit_fields)
+                yield self._prepare_action(object_instance, action, limit_fields, **kwargs)
 
     def _bulk(self, *args, parallel=False, using=None, **kwargs):
         """Helper for switching between normal and parallel bulk operation."""
