@@ -2,6 +2,7 @@ import io
 import sys
 import time
 from collections import deque
+from datetime import datetime
 from functools import partial
 from typing import Optional, Iterable
 
@@ -13,6 +14,7 @@ from opensearchpy.helpers import bulk, parallel_bulk
 from . import fields
 from .apps import DODConfig
 from .exceptions import ModelFieldNotMappedError
+from .indices import Index
 from .management.enums import OpensearchAction
 from .search import Search
 from .signals import post_index
@@ -44,9 +46,21 @@ model_field_class_to_field_class = {
 }
 
 
-class Document(DSLDocument):
+class IndexMeta(DSLIndexMeta):
+    """A specialized DSL IndexMeta that specializes the Document Index class."""
+
+    def __new__(mcs, *args, **kwargs):
+        """Override `_index` with django_opensearch_dsl Index class."""
+        new_cls = super().__new__(mcs, *args, **kwargs)
+        if new_cls._index and new_cls._index._name:  # noqa
+            new_cls._index.__class__ = Index  # noqa
+        return new_cls
+
+
+class Document(DSLDocument, metaclass=IndexMeta):
     """Allow the definition of Opensearch' index using Django `Model`."""
 
+    VERSION_NAME_SEPARATOR = "--"
     _prepared_fields = []
 
     def __init__(self, related_instance_to_ignore=None, **kwargs):
@@ -55,6 +69,64 @@ class Document(DSLDocument):
         # from related models on deletion.
         self._related_instance_to_ignore = related_instance_to_ignore
         self._prepared_fields = self.init_prepare()
+
+    @classmethod
+    def get_index_name(cls, suffix=None):
+        """Compute the concrete Index name for the given (or not) suffix."""
+        name = cls._index._name  # noqa
+        if suffix:
+            name += f"{cls.VERSION_NAME_SEPARATOR}{suffix}"
+        return name
+
+    @classmethod
+    def get_all_indices(cls, using=None):
+        """Fetches from OpenSearch all concrete indices for this Document."""
+        return [
+            Index(name)
+            for name in sorted(
+                cls._get_connection(using=using).indices.get(f"{cls._index._name}{cls.VERSION_NAME_SEPARATOR}*").keys()
+            )
+        ]
+
+    @classmethod
+    def get_active_index(cls, using=None):
+        """Return the Index that's active for this Document."""
+        for index in cls.get_all_indices(using=using):
+            if index.exists_alias(name=cls._index._name):  # noqa
+                return index
+
+    @classmethod
+    def migrate(cls, suffix, using=None):
+        """Sets an alias of the Document Index name to a given concrete Index."""
+        index_name = cls.get_index_name(suffix)
+
+        actions_on_aliases = [
+            {"add": {"index": index_name, "alias": cls._index._name}},  # noqa
+        ]
+
+        active_index = cls.get_active_index()
+        if active_index:
+            actions_on_aliases.insert(
+                0,
+                {"remove": {"index": active_index._name, "alias": cls._index._name}},  # noqa
+            )
+
+        if len(actions_on_aliases) == 1 and cls._index.exists():
+            cls._index.delete()
+
+        cls._get_connection(using=using).indices.update_aliases(body={"actions": actions_on_aliases})
+
+    @classmethod
+    def init(cls, suffix=None, using=None):
+        """Init the Index with a named suffix to handle multiple versions.
+
+        Create an alias to the default index name if it doesn't exist.
+        """
+        suffix = suffix or datetime.now().strftime("%Y%m%d%H%M%S%f")
+        index_name = cls.get_index_name(suffix)
+        super().init(index=index_name, using=using)
+        if not cls._index.exists():
+            cls.migrate(suffix, using=using)
 
     @classmethod
     def search(cls, using=None, index=None):
@@ -200,14 +272,14 @@ class Document(DSLDocument):
         """
         return object_instance.pk
 
-    def _prepare_action(self, object_instance, action, limit_fields):
+    def _prepare_action(self, object_instance, action, limit_fields, index_name=None):
         """Prepare an action dict for bulk indexing."""
         os_action = action if action != "upsert" else "update"
         if os_action != "update" and limit_fields is not None:
             raise ValueError("limit_fields can only be used with update action")
         body = {
             "_op_type": os_action,
-            "_index": self._index._name,  # noqa
+            "_index": index_name or self._index._name,  # noqa
             "_id": self.generate_id(object_instance),
         }
         source_field = "_source" if os_action != "update" else "doc"
@@ -236,10 +308,12 @@ class Document(DSLDocument):
         """
         return True
 
-    def update(self, thing, action, *args, refresh=None, using=None, limit_fields=None, **kwargs):  # noqa
+    def update(self, thing, action, *args, index_suffix=None, refresh=None, using=None, limit_fields=None, **kwargs):  # noqa
         """Update document in OS for a model, iterable of models or queryset."""
         if refresh is None:
             refresh = getattr(self.Index, "auto_refresh", DODConfig.auto_refresh_enabled())
+
+        index_name = self.__class__.get_index_name(index_suffix) if index_suffix else None
 
         if isinstance(thing, models.Model):
             object_list = [thing]
@@ -247,5 +321,5 @@ class Document(DSLDocument):
             object_list = thing
 
         return self._bulk(
-            self._get_actions(object_list, action, limit_fields), *args, refresh=refresh, using=using, **kwargs
+            self._get_actions(object_list, action, limit_fields, index_name=index_name), *args, refresh=refresh, using=using, **kwargs
         )
