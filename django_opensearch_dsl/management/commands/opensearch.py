@@ -349,6 +349,7 @@ class Command(BaseCommand):
                 "'document_date__gte=2020-05-21.\n"
                 "The accepted value type are:\n"
                 "  - 'None' ('[lookup]=')\n"
+                "  - 'bool' ('[lookup]=True')\n"
                 "  - 'float' ('[lookup]=1.12')\n"
                 "  - 'int' ('[lookup]=23')\n"
                 "  - 'datetime.date' ('[lookup]=2020-10-08')\n"

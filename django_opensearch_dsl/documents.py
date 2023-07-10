@@ -18,6 +18,7 @@ from .indices import Index
 from .management.enums import OpensearchAction
 from .search import Search
 from .signals import post_index
+from django.db import transaction
 
 model_field_class_to_field_class = {
     models.AutoField: fields.IntegerField,
@@ -175,20 +176,18 @@ class Document(DSLDocument, metaclass=IndexMeta):
         model = self.django.model.__name__
         action = action.present_participle.title()
 
-        i = 0
         done = 0
         start = time.time()
         if verbose:
             stdout.write(f"{action} {model}: 0% ({self._eta(start, done, count)})\r")
-        while done < count:
-            if verbose:
-                stdout.write(f"{action} {model}: {round(i / count * 100)}% ({self._eta(start, done, count)})\r")
 
-            for obj in qs[i : i + chunk_size]:
+        # The transaction ensures that Postgres can
+        with transaction.atomic():
+            for obj in qs.iterator(chunk_size=chunk_size):
                 done += 1
                 yield obj
-
-            i = min(i + chunk_size, count)
+                if verbose and done % chunk_size == 0:
+                    stdout.write(f"{action} {model}: {done / count:.0%} ({self._eta(start, done, count)})\r")
 
         if verbose:
             stdout.write(f"{action} {count} {model}: OK          \n")
@@ -308,7 +307,9 @@ class Document(DSLDocument, metaclass=IndexMeta):
         """
         return True
 
-    def update(self, thing, action, *args, index_suffix=None, refresh=None, using=None, limit_fields=None, **kwargs):  # noqa
+    def update(
+        self, thing, action, *args, index_suffix=None, refresh=None, using=None, limit_fields=None, **kwargs
+    ):  # noqa
         """Update document in OS for a model, iterable of models or queryset."""
         if refresh is None:
             refresh = getattr(self.Index, "auto_refresh", DODConfig.auto_refresh_enabled())
@@ -321,5 +322,9 @@ class Document(DSLDocument, metaclass=IndexMeta):
             object_list = thing
 
         return self._bulk(
-            self._get_actions(object_list, action, limit_fields, index_name=index_name), *args, refresh=refresh, using=using, **kwargs
+            self._get_actions(object_list, action, limit_fields, index_name=index_name),
+            *args,
+            refresh=refresh,
+            using=using,
+            **kwargs,
         )
